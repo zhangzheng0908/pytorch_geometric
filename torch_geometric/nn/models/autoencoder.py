@@ -136,7 +136,7 @@ class GAE(torch.nn.Module):
         return roc_auc_score(y, pred), average_precision_score(y, pred)
 
 
-class VGAE(GAE):
+class VGAE1(GAE):
     r"""The Variational Graph Auto-Encoder model from the
     `"Variational Graph Auto-Encoders" <https://arxiv.org/abs/1611.07308>`_
     paper.
@@ -184,6 +184,71 @@ class VGAE(GAE):
         return -0.5 * torch.mean(
             torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
 
+class VGMM_AE(GAE):
+    r"""The Variational Graph Auto-Encoder model from the
+    `"Variational Graph Auto-Encoders" <https://arxiv.org/abs/1611.07308>`_
+    paper.
+
+    Args:
+        encoder (torch.nn.Module): The encoder module to compute :math:`\mu`
+            and :math:`\log\sigma^2`.
+        decoder (torch.nn.Module, optional): The decoder module. If set to
+            :obj:`None`, will default to the
+            :class:`torch_geometric.nn.models.InnerProductDecoder`.
+            (default: :obj:`None`)
+    """
+    def __init__(self, encoder: Module, decoder: Optional[Module] = None):
+        super().__init__(encoder, decoder)
+
+    def reparametrize(self, mixture_weights: Tensor, means: Tensor, covs: Tensor) -> Tensor:
+        if self.training:
+            # Sample from Gaussian Mixture Model
+            component_indices = torch.multinomial(mixture_weights, 1).squeeze(1)
+            batch_size = mixture_weights.size(0)
+            num_components = mixture_weights.size(1)
+            indices = torch.arange(batch_size)
+            z = torch.stack([torch.distributions.MultivariateNormal(means[indices, component_indices[i]], covs[indices, component_indices[i]]).sample() for i in range(num_components)])
+            return z
+        else:
+            return means
+
+    def encode(self, *args, **kwargs) -> Tensor:
+        """"""
+        self.__mixture_weights__, self.__means__, self.__covs__ = self.encoder(*args, **kwargs)
+        z = self.reparametrize(self.__mixture_weights__, self.__means__, self.__covs__)
+        return z
+
+    def kl_loss(self, mixture_weights: Optional[Tensor] = None,
+                means: Optional[Tensor] = None, covs: Optional[Tensor] = None) -> Tensor:
+        r"""Computes the KL loss, either for the passed arguments :obj:`mixture_weights`,
+        :obj:`means`, and :obj:`covs`, or based on latent variables from last encoding.
+
+        Args:
+            mixture_weights (torch.Tensor, optional): The mixture weights for the Gaussian Mixture Model. If
+                set to :obj:`None`, uses the last computation of mixture weights.
+                (default: :obj:`None`)
+            means (torch.Tensor, optional): The means of the Gaussian Mixture Model. If
+                set to :obj:`None`, uses the last computation of means.
+                (default: :obj:`None`)
+            covs (torch.Tensor, optional): The covariances of the Gaussian Mixture Model. If
+                set to :obj:`None`, uses the last computation of covariances.
+                (default: :obj:`None`)
+        """
+        mixture_weights = self.__mixture_weights__ if mixture_weights is None else mixture_weights
+        means = self.__means__ if means is None else means
+        covs = self.__covs__ if covs is None else covs
+        num_components = mixture_weights.size(1)
+        batch_size = mixture_weights.size(0)
+        indices = torch.arange(batch_size)
+        kl_loss = torch.zeros(batch_size)
+        for i in range(num_components):
+            component_indices = torch.full((batch_size,), i, dtype=torch.long)
+            component_means = means[indices, component_indices]
+            component_covs = covs[indices, component_indices]
+            component_var = torch.sum(component_covs, dim=1)
+            component_kl = -0.5 * torch.sum(1 + torch.log(component_var) - component_means.pow(2) - component_var)
+            kl_loss += mixture_weights[indices, component_indices] * component_kl
+        return kl_loss.mean()
 
 class ARGA(GAE):
     r"""The Adversarially Regularized Graph Auto-Encoder model from the
